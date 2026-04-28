@@ -1,0 +1,27 @@
+slack:
+  webhook_url: "https://hooks.slack.com/services/T0B08S000KT/B0AV4CNHSUF/jpFBWsbZuBhuTtrXgYDYdmh"
+
+log:
+  nginx_access_log: "/var/log/nginx/hng-access.log"
+  audit_log: "/var/log/detector/audit.log"
+
+thresholds:
+  anomaly_zscore: 3.0
+  anomaly_rate_multiplier: 5.0
+  error_surge_multiplier: 3.0
+  tightened_zscore: 2.0
+  tightened_rate_multiplier: 3.0
+
+windows:
+  rate_window_seconds: 60
+  baseline_window_minutes: 30
+  baseline_recalc_seconds: 60
+  min_baseline_samples: 10
+
+ban:
+  schedule_minutes: [10, 30, 120]
+
+dashboard:
+  host: "0.0.0.0"
+  port: 8080
+  refresh_interval_seconds: 3
