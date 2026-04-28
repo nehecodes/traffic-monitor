@@ -1,0 +1,15 @@
+[project]
+name = "detector"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.136.1",
+    "psutil>=7.2.2",
+    "pydantic>=2.13.3",
+    "pyyaml>=6.0.3",
+    "requests>=2.33.1",
+    "uvicorn>=0.46.0",
+    "watchdog>=6.0.0",
+]
