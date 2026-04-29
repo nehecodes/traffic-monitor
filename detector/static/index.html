@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Sentinel — Traffic Monitor</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:      #0f1117;
+  --surface: #1a1d27;
+  --border:  #2a2d3a;
+  --text:    #e2e8f0;
+  --muted:   #64748b;
+  --green:   #22c55e;
+  --red:     #ef4444;
+  --yellow:  #f59e0b;
+  --blue:    #3b82f6;
+  --radius:  10px;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+  min-height: 100vh;
+}
+
+/* ── Header ── */
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  gap: 12px;
+}
+
+.logo {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--green);
+  flex-shrink: 0;
+  animation: pulse 2s ease-in-out infinite;
+}
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+.meta {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Warm-up notice ── */
+.warmup {
+  display: none;
+  margin: 16px 16px 0;
+  padding: 10px 14px;
+  background: rgba(245,158,11,0.1);
+  border: 1px solid rgba(245,158,11,0.3);
+  border-radius: var(--radius);
+  font-size: 13px;
+  color: var(--yellow);
+}
+.warmup.show { display: block; }
+
+/* ── Anomaly banner ── */
+.anomaly {
+  display: none;
+  margin: 16px 16px 0;
+  padding: 10px 14px;
+  background: rgba(239,68,68,0.1);
+  border: 1px solid rgba(239,68,68,0.4);
+  border-radius: var(--radius);
+  font-size: 13px;
+  color: var(--red);
+  animation: flash 1s ease-in-out infinite;
+}
+@keyframes flash { 0%,100%{opacity:1} 50%{opacity:0.7} }
+.anomaly.show { display: block; }
+
+/* ── Layout ── */
+.page { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+
+/* ── Stat row (top 4 numbers) ── */
+.stats-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+@media (min-width: 640px) {
+  .stats-row { grid-template-columns: repeat(4, 1fr); }
+}
+
+.stat-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+}
+
+.stat-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.stat-value {
+  font-size: 28px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--text);
+}
+
+/* ── Card ── */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+}
+
+.card-title {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  margin-bottom: 14px;
+}
+
+/* ── Meter ── */
+.meter { margin-bottom: 10px; }
+.meter:last-child { margin-bottom: 0; }
+.meter-header { display: flex; justify-content: space-between; margin-bottom: 4px; }
+.meter-name { font-size: 13px; color: var(--muted); }
+.meter-pct  { font-size: 13px; font-weight: 600; }
+.meter-track {
+  height: 6px;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.meter-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--blue);
+  transition: width 0.5s ease;
+}
+.meter-fill.warn { background: var(--yellow); }
+.meter-fill.crit { background: var(--red); }
+
+/* ── Baseline kv ── */
+.kv-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.kv-label { font-size: 11px; color: var(--muted); margin-bottom: 2px; }
+.kv-value { font-size: 20px; font-weight: 600; }
+
+/* ── Two-col layout on wider screens ── */
+@media (min-width: 768px) {
+  .two-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+}
+
+/* ── Tables ── */
+.tbl { width: 100%; border-collapse: collapse; }
+.tbl th {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.tbl td {
+  padding: 9px 8px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  vertical-align: middle;
+}
+.tbl tr:last-child td { border-bottom: none; }
+.tbl .mono { font-family: ui-monospace, monospace; font-size: 12px; }
+
+/* Hide less important columns on small screens */
+@media (max-width: 479px) {
+  .hide-xs { display: none; }
+}
+
+/* ── Bar ── */
+.bar-wrap { width: 60px; }
+@media (min-width: 480px) { .bar-wrap { width: 90px; } }
+.bar-track { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
+.bar-fill  { height: 100%; background: var(--blue); border-radius: 2px; transition: width 0.4s; }
+
+/* ── Badges ── */
+.badge {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.badge-red    { background: rgba(239,68,68,0.15);  color: var(--red);    border: 1px solid rgba(239,68,68,0.3); }
+.badge-yellow { background: rgba(245,158,11,0.12); color: var(--yellow); border: 1px solid rgba(245,158,11,0.3); }
+.badge-green  { background: rgba(34,197,94,0.1);   color: var(--green);  border: 1px solid rgba(34,197,94,0.25); }
+
+.empty { color: var(--muted); font-size: 13px; padding: 20px 0; text-align: center; }
+
+/* ── Refresh bar ── */
+.refresh-bar {
+  position: fixed; bottom: 0; left: 0;
+  height: 2px;
+  background: var(--blue);
+  animation: sweep 3s linear infinite;
+}
+@keyframes sweep { from { width: 0 } to { width: 100% } }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">Sentinel</div>
+  <div class="header-right">
+    <div class="dot" id="dot"></div>
+    <span class="meta" id="uptime">starting…</span>
+    <span class="meta hide-xs" id="lastUpdate"></span>
+  </div>
+</header>
+
+<div class="warmup" id="warmup">
+  ⏳ Baseline warming up — detection inactive until 5 min of data is collected.
+</div>
+
+<div class="anomaly" id="anomalyBanner"></div>
+
+<div class="page">
+
+  <!-- Top stats -->
+  <div class="stats-row">
+    <div class="stat-card">
+      <div class="stat-label">Global req/s</div>
+      <div class="stat-value" id="rps">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Blocked IPs</div>
+      <div class="stat-value" id="banCount" style="color:var(--red)">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Baseline mean</div>
+      <div class="stat-value" id="mean">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Std-dev</div>
+      <div class="stat-value" id="stddev">—</div>
+    </div>
+  </div>
+
+  <!-- System + Baseline -->
+  <div class="two-col">
+    <div class="card">
+      <div class="card-title">System</div>
+      <div class="meter">
+        <div class="meter-header">
+          <span class="meter-name">CPU</span>
+          <span class="meter-pct" id="cpuPct">—</span>
+        </div>
+        <div class="meter-track"><div class="meter-fill" id="cpuBar" style="width:0"></div></div>
+      </div>
+      <div class="meter">
+        <div class="meter-header">
+          <span class="meter-name">Memory</span>
+          <span class="meter-pct" id="memPct">—</span>
+        </div>
+        <div class="meter-track"><div class="meter-fill" id="memBar" style="width:0"></div></div>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px" id="memDetail"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Baseline (30-min rolling)</div>
+      <div class="kv-grid">
+        <div>
+          <div class="kv-label">Mean req/s</div>
+          <div class="kv-value" id="bMean">—</div>
+        </div>
+        <div>
+          <div class="kv-label">Std-dev</div>
+          <div class="kv-value" id="bStddev">—</div>
+        </div>
+        <div>
+          <div class="kv-label">Error mean</div>
+          <div class="kv-value" style="color:var(--yellow)" id="bErrMean">—</div>
+        </div>
+        <div>
+          <div class="kv-label">Samples</div>
+          <div class="kv-value" style="color:var(--muted)" id="bSamples">—</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Top IPs -->
+  <div class="card">
+    <div class="card-title">Top 10 Source IPs — last 60s</div>
+    <div style="overflow-x:auto">
+      <table class="tbl">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>IP Address</th>
+            <th>Reqs</th>
+            <th class="hide-xs">Share</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="ipBody">
+          <tr><td colspan="5" class="empty">Waiting for traffic…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Banned IPs -->
+  <div class="card">
+    <div class="card-title">Banned IPs</div>
+    <div style="overflow-x:auto">
+      <table class="tbl">
+        <thead>
+          <tr>
+            <th>IP Address</th>
+            <th>Tier</th>
+            <th class="hide-xs">Banned At</th>
+            <th>Expires</th>
+          </tr>
+        </thead>
+        <tbody id="banBody">
+          <tr><td colspan="4" class="empty">No active bans ✓</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<div class="refresh-bar"></div>
+
+<script>
+const API = '/api/metrics';
+
+const $ = id => document.getElementById(id);
+
+function n(v, d=2) { return typeof v === 'number' ? v.toFixed(d) : '—'; }
+
+function uptime(s) {
+  if (s < 60)   return s + 's';
+  if (s < 3600) return Math.floor(s/60) + 'm ' + (s%60) + 's';
+  return Math.floor(s/3600) + 'h ' + Math.floor((s%3600)/60) + 'm';
+}
+
+function countdown(secs) {
+  if (secs == null) return '<span style="color:var(--red);font-weight:600">PERMANENT</span>';
+  if (secs <= 0)    return '<span style="color:var(--green)">Expiring…</span>';
+  return Math.floor(secs/60) + 'm ' + (secs%60) + 's';
+}
+
+function tierLabel(t, perm) {
+  if (perm) return '<span class="badge badge-red">Permanent</span>';
+  const d = ['10m','30m','2h','Perm'][Math.min(t,3)];
+  return `<span class="badge badge-yellow">Tier ${t} · ${d}</span>`;
+}
+
+function meterClass(pct) {
+  return pct > 85 ? ' crit' : pct > 60 ? ' warn' : '';
+}
+
+async function poll() {
+  try {
+    const r = await fetch(API);
+    if (!r.ok) throw new Error(r.status);
+    render(await r.json());
+    $('dot').style.cssText = 'background:var(--green)';
+  } catch {
+    $('dot').style.cssText = 'background:var(--red)';
+  }
+}
+
+function render(d) {
+  const b = d.baseline;
+  const s = d.system;
+
+  // Header
+  $('uptime').textContent = 'Up ' + uptime(d.uptime_seconds);
+  $('lastUpdate').textContent = new Date(d.timestamp * 1000).toLocaleTimeString();
+
+  // Warmup notice
+  const ready = b.sample_count >= 300;
+  $('warmup').classList.toggle('show', !ready);
+
+  // Global RPS colour
+  const rpsEl = $('rps');
+  rpsEl.textContent = n(d.global_rps);
+  const ratio = b.mean > 0 ? d.global_rps / b.mean : 0;
+  rpsEl.style.color = ratio > 5 ? 'var(--red)' : ratio > 3 ? 'var(--yellow)' : 'var(--text)';
+
+  // Anomaly banner
+  const z = b.stddev > 0 ? (d.global_rps - b.mean) / b.stddev : 0;
+  const anom = ready && (z > 3 || (b.mean > 0 && d.global_rps > 5 * b.mean));
+  const ab = $('anomalyBanner');
+  if (anom) {
+    ab.textContent = `⚠ Global anomaly — ${n(d.global_rps)} req/s, z=${n(z)}, baseline ${n(b.mean)} ± ${n(b.stddev)}`;
+    ab.classList.add('show');
+  } else {
+    ab.classList.remove('show');
+  }
+
+  // Stat cards
+  $('banCount').textContent  = d.banned_ips.length;
+  $('mean').textContent      = n(b.mean);
+  $('stddev').textContent    = n(b.stddev);
+
+  // System
+  const cpu = s.cpu_percent, mem = s.mem_percent;
+  $('cpuPct').textContent   = n(cpu,1) + '%';
+  $('cpuBar').style.width   = cpu + '%';
+  $('cpuBar').className     = 'meter-fill' + meterClass(cpu);
+  $('memPct').textContent   = n(mem,1) + '%';
+  $('memBar').style.width   = mem + '%';
+  $('memBar').className     = 'meter-fill' + meterClass(mem);
+  $('memDetail').textContent = `${n(s.mem_used_mb,0)} / ${n(s.mem_total_mb,0)} MB`;
+
+  // Baseline
+  $('bMean').textContent    = n(b.mean);
+  $('bStddev').textContent  = n(b.stddev);
+  $('bErrMean').textContent = n(b.error_mean);
+  $('bSamples').textContent = b.sample_count;
+
+  // Top IPs
+  const bannedSet = new Set(d.banned_ips.map(x => x.ip));
+  const max = d.top_ips.length ? d.top_ips[0].count : 1;
+  $('ipBody').innerHTML = d.top_ips.length ? d.top_ips.map((row, i) => {
+    const pct = Math.round(row.count / max * 100);
+    const status = bannedSet.has(row.ip)
+      ? '<span class="badge badge-red">Banned</span>'
+      : '<span class="badge badge-green">OK</span>';
+    return `<tr>
+      <td style="color:var(--muted)">${i+1}</td>
+      <td class="mono">${row.ip}</td>
+      <td>${row.count}</td>
+      <td class="hide-xs">
+        <div class="bar-wrap">
+          <div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>
+        </div>
+      </td>
+      <td>${status}</td>
+    </tr>`;
+  }).join('') : '<tr><td colspan="5" class="empty">No traffic yet</td></tr>';
+
+  // Banned IPs
+  $('banBody').innerHTML = d.banned_ips.length ? d.banned_ips.map(b => `<tr>
+    <td class="mono" style="color:var(--red)">${b.ip}</td>
+    <td>${tierLabel(b.tier, b.permanent)}</td>
+    <td class="hide-xs" style="color:var(--muted)">${new Date(b.banned_at*1000).toLocaleTimeString()}</td>
+    <td>${countdown(b.remaining_seconds)}</td>
+  </tr>`).join('') : '<tr><td colspan="4" class="empty">No active bans ✓</td></tr>';
+}
+
+poll();
+setInterval(poll, 3000);
+</script>
+</body>
+</html>
