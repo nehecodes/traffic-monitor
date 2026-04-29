@@ -12,8 +12,12 @@ import time
 
 BAN_SCHEDULE_MINUTES = [10, 30, 120]
 
-_bans: dict[str, dict] = {}
+# IPs that are never blocked — populated from config.yaml by main.py
+WHITELIST: set[str] = set()
 
+# Active bans:  ip → {tier, banned_at, unban_at, permanent}
+_bans: dict[str, dict] = {}
+# Tier memory:  ip → next_tier (persists across unban/reban cycles)
 _tier_memory: dict[str, int] = {}
 _lock = threading.Lock()
 
@@ -24,14 +28,24 @@ _lock = threading.Lock()
 def _iptables(action: str, ip: str) -> None:
     flag = "-I" if action == "add" else "-D"
     try:
-        subprocess.run(
+        result = subprocess.run(
             ["iptables", flag, "INPUT", "-s", ip, "-j", "DROP"],
             capture_output=True,
             timeout=5,
             check=False,
         )
-    except (subprocess.SubprocessError, FileNotFoundError):
-        print(f"[blocker] iptables unavailable — simulating {action} for {ip}")
+        if result.returncode != 0:
+            print(
+                f"[blocker] iptables error: {result.stderr.decode().strip()}",
+                flush=True,
+            )
+        else:
+            print(f"[blocker] iptables {action} {ip} OK", flush=True)
+    except (subprocess.SubprocessError, FileNotFoundError) as exc:
+        print(f"[blocker] iptables unavailable: {exc}", flush=True)
+
+
+# ── Public API ────────────────────────────────────────────────────────────────
 
 
 def is_blocked(ip: str) -> bool:
@@ -43,7 +57,12 @@ def block(ip: str) -> int:
     """
     Add iptables DROP rule. Returns ban duration in minutes (0 = permanent).
     Idempotent — if already blocked, returns 0 without re-blocking.
+    Whitelisted IPs are silently skipped.
     """
+    if ip in WHITELIST:
+        print(f"[blocker] skipping whitelisted IP {ip}", flush=True)
+        return 0
+
     with _lock:
         if ip in _bans:
             return 0
