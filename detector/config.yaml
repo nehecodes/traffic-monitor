@@ -12,14 +12,28 @@ thresholds:
   tightened_zscore: 2.0
   tightened_rate_multiplier: 3.0
 
+  # Absolute rate floors — an IP below this is NEVER blocked regardless of
+  # z-score or multiplier. Protects against false positives when the baseline
+  # mean is near zero (e.g. low-traffic periods or shortly after startup).
+  # 10 req/s per IP = 600 req/min — unambiguous sustained attack traffic.
+  min_absolute_rate: 10.0         # per-IP floor (req/s)
+  min_absolute_global_rate: 20.0  # global floor (req/s)
+
 windows:
   rate_window_seconds: 60
   baseline_window_minutes: 30
   baseline_recalc_seconds: 60
-  min_baseline_samples: 10
+
+  # Minimum baseline samples before detection activates.
+  # 300 = 5 minutes of 1-per-second recordings — enough for a meaningful mean.
+  # Below this threshold the detector stays completely silent.
+  min_baseline_samples: 300
 
 ban:
-  schedule_minutes: [10, 30, 120]
+  schedule_minutes: [10, 30, 120]   # 4th offence and beyond → permanent
+
+whitelist:
+  - ""    # add your home/office IP here to prevent accidental self-block
 
 dashboard:
   host: "0.0.0.0"
