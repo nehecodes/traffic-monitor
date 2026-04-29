@@ -1,11 +1,18 @@
 """
 baseline.py — Rolling 30-minute baseline of per-second request counts.
 
-* Every second main.py appends the current req/s to a circular buffer.
-* A background thread recalculates mean/stddev every 60 seconds and
-  writes a BASELINE_RECALC entry to the audit log.
+Design notes
+------------
+* Every second main.py appends the current global req/s to a circular buffer.
+* A background thread recalculates mean/stddev every 60 seconds.
 * Counts are also bucketed by hour-of-day; the current hour's slot is
   preferred once it has >= MIN_SAMPLES entries.
+* The stddev floor is proportional: max(sqrt(var), mean*0.5, 0.5).
+  A tiny absolute floor (0.01) causes z-scores of 30+ on near-zero baselines,
+  which is the root cause of false-positive blocks during warm-up.
+* Detection is gated on MIN_SAMPLES = 300 (5 minutes of 1-sample-per-second
+  recordings). Fewer than 300 samples means the baseline is not yet
+  representative of real traffic and the detector must stay silent.
 """
 
 import math
@@ -15,12 +22,12 @@ from collections import deque, defaultdict
 
 from audit import audit_log
 
-BASELINE_WINDOW_SECONDS = 30 * 60
-RECALC_INTERVAL = 60
-MIN_SAMPLES = 10
+BASELINE_WINDOW_SECONDS = 30 * 60  # 30 minutes
+RECALC_INTERVAL = 60  # seconds between recalculations
+MIN_SAMPLES = 300  # ~5 minutes — minimum before detection activates
 
-_counts: deque = deque()
-_error_counts: deque = deque()
+_counts: deque = deque()  # (timestamp, req/s)
+_error_counts: deque = deque()  # (timestamp, err/s)
 
 _hour_slots: defaultdict = defaultdict(list)
 _error_hour_slots: defaultdict = defaultdict(list)
@@ -34,6 +41,7 @@ stats = {
     "error_stddev": 1.0,
     "last_recalc": 0.0,
     "sample_count": 0,
+    "error_sample_count": 0,
 }
 
 
@@ -43,9 +51,13 @@ def _mean_stddev(values: list[float]) -> tuple[float, float]:
     n = len(values)
     mu = sum(values) / n
     if n < 2:
-        return mu, 1.0
+        return mu, max(mu * 0.5, 0.5)
     var = sum((x - mu) ** 2 for x in values) / (n - 1)
-    return mu, max(math.sqrt(var), 0.01)
+    sd = math.sqrt(var)
+    # Floor: stddev must be at least half the mean AND at least 0.5 req/s.
+    # This prevents z-scores of 30+ when the baseline mean is near zero.
+    floor = max(mu * 0.5, 0.5)
+    return mu, max(sd, floor)
 
 
 def _recalc() -> None:
@@ -62,7 +74,7 @@ def _recalc() -> None:
         values = [c for _, c in _counts]
         error_values = [c for _, c in _error_counts]
 
-        # Prefer current-hour slot when it has enough samples
+        # Prefer current-hour slot when it has enough data
         hour_vals = _hour_slots[current_hour]
         if len(hour_vals) >= MIN_SAMPLES:
             values = hour_vals[-BASELINE_WINDOW_SECONDS:]
@@ -83,10 +95,10 @@ def _recalc() -> None:
                 "error_stddev": esd,
                 "last_recalc": now,
                 "sample_count": len(values),
+                "error_sample_count": len(error_values),
             }
         )
 
-    # Audit log every recalculation — required by spec
     audit_log(
         action="BASELINE_RECALC",
         ip="-",
@@ -128,6 +140,8 @@ def get_stats() -> dict:
 
 
 def start() -> None:
-    t = threading.Thread(target=_background_recalc, daemon=True, name="baseline-recalc")
-    t.start()
-    threading.Timer(5.0, _recalc).start()
+    threading.Thread(
+        target=_background_recalc, daemon=True, name="baseline-recalc"
+    ).start()
+    # No early recalc — the 60s interval is the first meaningful calculation.
+    # Firing at t=5s with 5 samples produces a misleading baseline.
