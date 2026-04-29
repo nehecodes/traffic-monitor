@@ -1,12 +1,30 @@
 """
 detector.py — Anomaly detection engine. Ticks every second.
 
-Rules
------
+Rules (per spec)
+----------------
 1. Z-score > 3.0  OR  rate > 5× mean  → anomaly (whichever fires first)
-2. IP 4xx/5xx rate ≥ 3× error baseline → tighten thresholds to z>2.0 / rate>3×
-3. Per-IP anomaly  → iptables block + Slack alert (target: within 10 s of event)
-4. Global anomaly  → Slack alert only
+2. IP 4xx/5xx rate ≥ 3× error baseline → tighten thresholds to z>2.0 / 3×
+3. Per-IP anomaly  → iptables block + Slack alert (within 10 s)
+4. Global anomaly  → Slack alert only (never auto-block global traffic)
+
+Guards against false positives
+-------------------------------
+* Detection is silent until sample_count >= MIN_SAMPLES (300 = 5 min).
+  Below this threshold the baseline mean is not representative.
+
+* MIN_ABSOLUTE_RATE = 10.0 req/s — an IP doing fewer than 10 requests
+  per second is NEVER blocked regardless of z-score or multiplier.
+  Rationale: at near-zero baselines (mean=0.05) the 5× multiplier fires
+  at 0.25 req/s = 15 requests per minute, which is normal browser behaviour.
+  The absolute floor ensures the spec thresholds are applied only when
+  the rate is genuinely high in absolute terms.
+
+* Error surge tightening requires BOTH err_mean > 0 AND at least
+  MIN_SAMPLES error samples. Tightening on a zero or near-zero error
+  baseline causes the same false-positive problem as the rate baseline.
+
+* Global anomaly detection uses the same absolute floor.
 """
 
 import time
@@ -18,6 +36,7 @@ import blocker
 import notifier
 from audit import audit_log
 
+# ── Configurable thresholds (overridden by main.py from config.yaml) ─────────
 ANOMALY_ZSCORE = 3.0
 ANOMALY_RATE_MULT = 5.0
 ERROR_SURGE_MULT = 3.0
@@ -25,11 +44,24 @@ TIGHTENED_ZSCORE = 2.0
 TIGHTENED_RATE_MULT = 3.0
 WINDOW_SECONDS = 60
 
+# Absolute rate floor — never block below this regardless of z-score.
+# Set to 10 req/s: a legitimate page load generates ~20 req over ~2 seconds
+# which looks like 0.33 req/s averaged over the 60s window — well below floor.
+# A real attack at 10 req/s = 600 requests per minute is unambiguous.
+MIN_ABSOLUTE_RATE = 10.0  # req/s — per-IP floor
+MIN_ABSOLUTE_GLOBAL_RATE = 20.0  # req/s — global floor (higher: shared across all IPs)
+
+# Minimum baseline samples before detection activates (must match baseline.py)
+MIN_SAMPLES = 300
+
 _alerted_global = False
 _alerted_global_lock = threading.Lock()
 
 _tightened_ips: set[str] = set()
 _tightened_lock = threading.Lock()
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 
 def _rate(window) -> float:
@@ -46,13 +78,31 @@ def _is_anomalous(
     stddev: float,
     zt: float,
     mt: float,
+    abs_floor: float,
 ) -> tuple[bool, str]:
+    """
+    Return (is_anomalous, reason_string).
+
+    Checks in order:
+    1. Absolute rate floor — never anomalous below this.
+    2. Z-score threshold.
+    3. Rate multiplier threshold.
+    """
+    # Absolute floor: protects against false positives on near-zero baselines
+    if rate < abs_floor:
+        return False, ""
+
     z = _zscore(rate, mean, stddev)
     if z > zt:
         return True, f"z-score={z:.2f}>{zt}"
+
     if mean > 0 and rate > mt * mean:
         return True, f"rate={rate:.2f}>{mt}x_mean={mean:.2f}"
+
     return False, ""
+
+
+# ── Detection tick ────────────────────────────────────────────────────────────
 
 
 def tick() -> None:
@@ -60,16 +110,25 @@ def tick() -> None:
     mean = stats["mean"]
     stddev = stats["stddev"]
     err_mean = stats["error_mean"]
+    n_samples = stats["sample_count"]
+    n_error_samples = stats["error_sample_count"]
 
-    if stats["sample_count"] < 10:
+    # Gate: require a mature baseline before any detection fires.
+    # 300 samples = 5 minutes of 1-per-second recordings.
+    if n_samples < MIN_SAMPLES:
         return
 
-    # ── Global ────────────────────────────────────────────────────────────────
+    # ── Global check ──────────────────────────────────────────────────────────
     with monitor.state_lock:
         g_rate = _rate(monitor.global_window)
 
     anomalous, reason = _is_anomalous(
-        g_rate, mean, stddev, ANOMALY_ZSCORE, ANOMALY_RATE_MULT
+        g_rate,
+        mean,
+        stddev,
+        ANOMALY_ZSCORE,
+        ANOMALY_RATE_MULT,
+        MIN_ABSOLUTE_GLOBAL_RATE,
     )
     with _alerted_global_lock:
         global _alerted_global
@@ -84,7 +143,7 @@ def tick() -> None:
         elif not anomalous:
             _alerted_global = False
 
-    # ── Per-IP ────────────────────────────────────────────────────────────────
+    # ── Per-IP checks ─────────────────────────────────────────────────────────
     with monitor.state_lock:
         ips = list(monitor.ip_windows.keys())
 
@@ -99,8 +158,16 @@ def tick() -> None:
         with _tightened_lock:
             tightened = ip in _tightened_ips
 
-        # Error surge → tighten thresholds
-        if err_mean > 0 and ip_erate >= ERROR_SURGE_MULT * err_mean:
+        # Error surge → tighten thresholds.
+        # Guard: require err_mean > 0 AND enough error baseline samples.
+        # Without the sample guard, a single 404 on a zero-error baseline
+        # produces err_mean≈0 → the "err_mean > 0" check passes spuriously
+        # on the first recalc tick after errors arrive.
+        if (
+            err_mean > 0
+            and n_error_samples >= MIN_SAMPLES
+            and ip_erate >= ERROR_SURGE_MULT * err_mean
+        ):
             with _tightened_lock:
                 _tightened_ips.add(ip)
             tightened = True
@@ -108,7 +175,14 @@ def tick() -> None:
         zt = TIGHTENED_ZSCORE if tightened else ANOMALY_ZSCORE
         mt = TIGHTENED_RATE_MULT if tightened else ANOMALY_RATE_MULT
 
-        anomalous, reason = _is_anomalous(ip_rate, mean, stddev, zt, mt)
+        anomalous, reason = _is_anomalous(
+            ip_rate,
+            mean,
+            stddev,
+            zt,
+            mt,
+            MIN_ABSOLUTE_RATE,
+        )
         if anomalous:
             duration = blocker.block(ip)
             audit_log(
