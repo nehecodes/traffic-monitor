@@ -27,12 +27,12 @@ Guards against false positives
 * Global anomaly detection uses the same absolute floor.
 """
 
-import time
 import threading
+import time
 
-import monitor
 import baseline
 import blocker
+import monitor
 import notifier
 from audit import audit_log
 
