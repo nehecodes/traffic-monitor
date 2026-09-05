@@ -69,7 +69,7 @@ class MetricsResponse(BaseModel):
 
 # ── App ───────────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Detector — HNG Traffic Monitor")
+app = FastAPI(title="Norma — Traffic Monitor")
 
 app.add_middleware(
     CORSMiddleware,
