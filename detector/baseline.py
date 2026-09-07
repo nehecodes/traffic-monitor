@@ -20,7 +20,7 @@ import time
 import threading
 from collections import deque, defaultdict
 
-from audit import audit_log
+from .audit import audit_log
 
 BASELINE_WINDOW_SECONDS = 30 * 60  # 30 minutes
 RECALC_INTERVAL = 60  # seconds between recalculations
