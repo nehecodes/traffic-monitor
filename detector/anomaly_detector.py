@@ -30,11 +30,12 @@ Guards against false positives
 import threading
 import time
 
-import baseline
-import blocker
-import monitor
-import notifier
-from audit import audit_log
+from . import baseline
+from . import blocker
+from . import monitor
+from . import notifier
+from .audit import audit_log
+from .blocker import IptablesError
 
 # ── Configurable thresholds (overridden by main.py from config.yaml) ─────────
 ANOMALY_ZSCORE = 3.0
@@ -184,23 +185,44 @@ def tick() -> None:
             MIN_ABSOLUTE_RATE,
         )
         if anomalous:
-            duration = blocker.block(ip)
-            audit_log(
-                action="BAN",
-                ip=ip,
-                condition=reason,
-                rate=ip_rate,
-                baseline=mean,
-                duration=f"{duration}m" if duration else "permanent",
-            )
-            notifier.send_ip_alert(
-                ip=ip,
-                condition=reason,
-                rate=ip_rate,
-                baseline_mean=mean,
-                baseline_stddev=stddev,
-                ban_duration_minutes=duration,
-            )
+            try:
+                duration = blocker.block(ip)
+                
+                # Format duration for logging
+                if duration is None:
+                    duration_str = "permanent"
+                elif duration == 0:
+                    duration_str = "whitelisted"
+                else:
+                    duration_str = f"{duration}m"
+                
+                audit_log(
+                    action="BAN",
+                    ip=ip,
+                    condition=reason,
+                    rate=ip_rate,
+                    baseline=mean,
+                    duration=duration_str,
+                )
+                notifier.send_ip_alert(
+                    ip=ip,
+                    condition=reason,
+                    rate=ip_rate,
+                    baseline_mean=mean,
+                    baseline_stddev=stddev,
+                    ban_duration_minutes=duration if duration else 0,
+                )
+            except IptablesError as e:
+                # Log the failure but don't crash the detector
+                audit_log(
+                    action="BAN_FAILED",
+                    ip=ip,
+                    condition=f"iptables_error: {reason}",
+                    rate=ip_rate,
+                    baseline=mean,
+                    duration=str(e),
+                )
+                print(f"[detector] Failed to block {ip}: {e}", flush=True)
 
 
 def start() -> None:
