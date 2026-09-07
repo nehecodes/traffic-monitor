@@ -21,9 +21,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-import monitor
-import baseline
-import blocker
+from . import monitor
+from . import baseline
+from . import blocker
 
 # ── Pydantic models ───────────────────────────────────────────────────────────
 
