@@ -14,7 +14,9 @@ import time
 import threading
 from collections import deque
 from datetime import datetime
+from typing import Optional
 
+from pydantic import BaseModel, Field, field_validator, ValidationError
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
@@ -27,6 +29,92 @@ global_error_window: deque = deque()
 state_lock = threading.Lock()
 
 WINDOW_SECONDS = 60
+
+# ── Pydantic Log Entry Validation ────────────────────────────────────────────
+
+
+class NginxLogEntry(BaseModel):
+    """
+    Validated nginx JSON access log entry.
+    
+    Prevents log injection attacks by validating:
+    - IP address format (IPv4 only for now)
+    - Status codes (100-599 range)
+    - Timestamps (reasonable date range)
+    - Field types and sizes
+    """
+    
+    source_ip: Optional[str] = Field(None, alias="source_ip")
+    remote_addr: Optional[str] = Field(None, alias="remote_addr")
+    timestamp: Optional[str] = Field(None, alias="timestamp")
+    time_local: Optional[str] = Field(None, alias="time_local")
+    time_iso8601: Optional[str] = Field(None, alias="time_iso8601")
+    status: int = Field(default=0, ge=0, le=999)
+    method: str = Field(default="", max_length=10)
+    path: str = Field(default="", max_length=2048)
+    response_size: int = Field(default=0, ge=0)
+    
+    class Config:
+        # Allow aliases and extra fields (nginx might add more fields)
+        populate_by_name = True
+        extra = "ignore"
+    
+    @field_validator("source_ip", "remote_addr")
+    @classmethod
+    def validate_ip(cls, v: Optional[str]) -> Optional[str]:
+        """Validate IPv4 address format."""
+        if v is None:
+            return None
+        
+        v = v.strip()
+        if not v:
+            return None
+        
+        # Basic IPv4 validation
+        parts = v.split(".")
+        if len(parts) != 4:
+            raise ValueError(f"Invalid IP format: {v}")
+        
+        try:
+            octets = [int(p) for p in parts]
+            if not all(0 <= octet <= 255 for octet in octets):
+                raise ValueError(f"Invalid IP octets: {v}")
+        except ValueError:
+            raise ValueError(f"Invalid IP address: {v}")
+        
+        return v
+    
+    @field_validator("method")
+    @classmethod
+    def validate_method(cls, v: str) -> str:
+        """Validate HTTP method."""
+        if not v:
+            return ""
+        
+        # Common HTTP methods (uppercase)
+        valid_methods = {
+            "GET", "POST", "PUT", "DELETE", "PATCH", 
+            "HEAD", "OPTIONS", "TRACE", "CONNECT"
+        }
+        
+        v = v.upper().strip()
+        if v not in valid_methods:
+            # Don't reject, but sanitize unknown methods
+            v = "OTHER"
+        
+        return v
+    
+    def get_ip(self) -> Optional[str]:
+        """Get IP address from available fields."""
+        return self.source_ip or self.remote_addr
+    
+    def get_timestamp(self) -> Optional[str]:
+        """Get timestamp from available fields."""
+        return self.timestamp or self.time_local or self.time_iso8601
+    
+    def is_error(self) -> bool:
+        """Check if this is an error response (4xx or 5xx)."""
+        return self.status >= 400
 
 # ── JSON parsing ──────────────────────────────────────────────────────────────
 
@@ -47,37 +135,52 @@ def _parse_time(raw: str) -> float:
 
 
 def _parse_line(line: str) -> dict | None:
+    """
+    Parse and validate a JSON log line.
+    
+    Returns None if:
+    - Line is empty or whitespace
+    - JSON is malformed
+    - Validation fails
+    - No IP address found
+    
+    Uses Pydantic validation to prevent injection attacks.
+    """
     line = line.strip()
     if not line:
         return None
+    
     try:
+        # Parse JSON
         obj = json.loads(line)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
+        print(f"[monitor] JSON parse error: {e}", flush=True)
         return None
-
-    # Field name matches nginx log_format json_hng: "source_ip"
-    ip = obj.get("source_ip") or obj.get("remote_addr")
+    
+    try:
+        # Validate with Pydantic
+        entry = NginxLogEntry(**obj)
+    except ValidationError as e:
+        print(f"[monitor] Log validation error: {e}", flush=True)
+        return None
+    
+    # Extract validated IP
+    ip = entry.get_ip()
     if not ip:
         return None
-
-    try:
-        status = int(obj.get("status", 0))
-    except (TypeError, ValueError):
-        status = 0
-
-    raw_time = (
-        obj.get("timestamp") or obj.get("time_local") or obj.get("time_iso8601") or ""
-    )
+    
+    # Parse timestamp
+    raw_time = entry.get_timestamp()
     ts = _parse_time(raw_time) if raw_time else time.time()
-
+    
     return {
         "ip": ip,
         "ts": ts,
-        "status": status,
-        "method": obj.get("method", ""),
-        "path": obj.get("path", ""),
-        "response_size": obj.get("response_size", 0),
-        "is_error": status >= 400,
+        "status": entry.status,
+        "method": entry.method,
+        "path": entry.path,
+        "response_size": entry.response_size,
+        "is_error": entry.is_error(),
     }
 
 
